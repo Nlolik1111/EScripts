@@ -1,1161 +1,877 @@
-# Полное руководство по EScript 1.3 (beta)
-
-Это расширенная документация для единого языка EScript. Здесь собраны правила синтаксиса, формальная грамматика, справка по встроенным функциям, рекомендации по безопасности и отладке, а также пошаговые примеры для администраторов и авторов скриптов. В тексте нет длинных тире, только короткие дефисы. Все примеры используют файлы с расширением .escript.
-
-## 1. Быстрый старт
-1. Создайте файл с именем `my_script.escript`.
-2. Опишите команды через `command "имя"(параметры):`.
-3. Используйте отступы в два пробела. Табуляцию не используйте.
-4. Загружайте файл целиком. JSON-actions и старые обёртки не принимаются.
-5. Проверяйте лог компиляции: предупреждения и ошибки выводятся сразу при загрузке.
-6. Команды автоматически добавляются в `!!помощь` под префиксами, настроенными в чате.
-
-## 2. Формальная грамматика
-Ниже указана базовая структура файла. Отступы определяют вложенность блоков.
-```
-script       ::= (command | fn | import_stmt | const)+
-command      ::= "command" NAME command_params? command_return? ":" NEWLINE block
-fn           ::= "fn" NAME fn_params? fn_return? ":" NEWLINE block
-command_params ::= "(" param_list? ")"
-fn_params      ::= "(" param_list? ")"
-param_list   ::= param ("," param)*
-param        ::= NAME ":" TYPE ("=" expr)?
-command_return ::= "->" TYPE
-fn_return      ::= "->" TYPE
-block        ::= INDENT statement+ DEDENT
-statement    ::= let_stmt | set_stmt | if_stmt | while_stmt | for_stmt | foreach_stmt | try_stmt | return_stmt | break_stmt | continue_stmt | expr_stmt
-let_stmt     ::= "let" NAME ":" TYPE "=" expr
-set_stmt     ::= "set" NAME "=" expr
-if_stmt      ::= "if" expr ":" NEWLINE block ("else:" NEWLINE block)?
-while_stmt   ::= "while" expr ":" NEWLINE block
-for_stmt     ::= "for" NAME "in" range_expr ":" NEWLINE block
-foreach_stmt ::= "for" NAME "in" expr ":" NEWLINE block
-try_stmt     ::= "try:" NEWLINE block "catch" NAME ":" NEWLINE block
-return_stmt  ::= "return" expr?
-expr_stmt    ::= expr
-range_expr   ::= expr "to" expr ("step" expr)?
-expr         ::= literals | calls | operations | names
-```
-Типы: number, string, bool, array, object, null, any. Псевдонимы не поддерживаются.
-
-## 3. Типы и вывод типов
-- Все параметры объявляются с типами. Пример: `command "pay"(amount: number):`.
-- `let` всегда требует тип. `set` использует ранее объявленный тип переменной.
-- Возвращаемый тип в командах опционален, но помогает автодополнению и тестам.
-- `any` используйте только когда входные данные не контролируются.
-- Рантайм проверяет соответствие типов при каждом вызове функции или команды.
-
-## 4. Области видимости
-Каждая команда и каждая пользовательская функция создают собственный слой переменных. Внутренние блоки получают доступ к переменным внешнего блока только для чтения и записи через `set`. Переменная, объявленная через `let`, видна только в текущем блоке и его дочерних блоках. `var_unset` удаляет переменную из ближайшего доступного scope. Проверка `var_exists` сообщает, определено ли имя после учёта удаления.
-
-### Пример со scope
-```
-command "scope_demo"():
-  let base: number = 10
-  if base > 5:
-    let bonus: number = 2
-    set base = base + bonus
-  var_unset("bonus")
-  if var_exists("bonus"):
-    message_send(chat_id(ctx), "bonus still alive")
-  else:
-    message_send(chat_id(ctx), "bonus removed")
-```
-## 5. Ошибки и обработка
-Все ошибки имеют код, сообщение и стек. Используйте try/catch для локального перехвата. Ошибки можно пробрасывать повторно через `throw`. Компилятор выдаёт предупреждения с привязкой к строкам и подсказками. Логи попадают в файлы скриптов и консоль администратора.
-
-### Мягкая валидация
-- Нетипизированный параметр автоматически превращается в `any` и помечается предупреждением.
-- Неизвестный тип подменяется на `any`, чтобы загрузка не срывалась.
-- `let` без значения получает `null`, без типа — `any`; обе подстановки фиксируются предупреждениями.
-- Сигнатура без скобок трактуется как команда без аргументов, хвост строки остаётся описанием.
-- Предупреждения записываются вместе со скриптом и показываются админам, но не блокируют исполнение.
-
-```
-command "safe_http"():
-  try:
-    let resp: object = http_get("https://example.com")
-    if resp.status != 200:
-      throw("http_failed")
-  catch err:
-    log("error", "request failed", err)
-    return
-```
-## 6. Импорт модулей и неймспейсы
-- Поддерживаются относительные импорты внутри папки скрипта: `import utils.time`.
-- Имена модулей формируют неймспейс. Доступ к функциям: `utils.time.now()`.
-- Импорты должны идти в начале файла до объявлений команд и функций.
-
-## 7. Литералы и коллекции
-- Объекты задаются как `{ "key": "value", "num": 1 }`. Значения могут быть любыми выражениями.
-- Массивы задаются как `[1, 2, 3]` или смешанными типами `[1, "a", true]`.
-- Вызовы функций могут возвращать объекты и массивы, их можно распаковывать в переменные.
-- Доступ к полям объекта через точку: `user.name`. К индексам массива через квадратные скобки: `arr[0]`.
-
-## 8. Управление потоком
-Условия записываются в привычной форме. Циклы `for` умеют работать с диапазоном через `to` и шаг через `step`. `foreach` перебирает любой массив или объект (ключи). Блоки `try/catch` перехватывают ошибки рантайма. `break` и `continue` работают внутри циклов.
-
-### Пример for c диапазоном
-```
-command "countdown"():
-  for i in 5 to 1 step -1:
-    message_send(chat_id(ctx), to_string(i))
-```
-### Пример foreach по массиву
-```
-command "list_items"():
-  let items: array = ["яблоко", "груша", "слива"]
-  for item in items:
-    message_send(chat_id(ctx), item)
-```
-## 9. Пользовательские функции и перегрузка
-- Функции объявляются через `fn`. Можно указать значения по умолчанию.
-- Перегрузка разрешена по числу и типам аргументов. Рантайм выбирает лучшую сигнатуру.
-- Возвращаемый тип обязателен для явности. Если не указан, используется any.
-- Функции могут быть объявлены до или после команд, но лучше группировать по смыслу.
-
-```
-fn bonus(amount: number, factor: number=1.1) -> number:
-  return amount * factor
-
-fn bonus(amount: string) -> number:
-  let parsed: number|null = to_number(amount)
-  if parsed == null:
-    throw("invalid_amount")
-  return parsed
-```
-## 10. Макросы и шаблоны
-Макросы позволяют описывать повторяющиеся действия экономии, банов, UI или логирования. Макрос разворачивается на этапе компиляции и проверяется типами так же, как обычный код.
-
-```
-macro ensure_balance(user_id: string, amount: number):
-  if not balance_can_remove(user_id, amount):
-    message_send(chat_id(ctx), "Недостаточно средств")
-    return false
-  return true
-```
-## 11. Дебаггер и трассировка
-- Используйте `debug_break()` для установки точки останова. Выполнение остановится и покажет текущие переменные.
-- Команда `debug_step()` выполняет следующую строку и снова останавливается.
-- `debug_trace()` выводит стек вызовов и значения параметров.
-- Включите детальную трассировку через флаг скрипта или настройку администратора.
-
-## 12. Безопасность и лимиты
-- Каждый скрипт получает лимиты по времени, памяти и сетевым запросам.
-- HTTP доступ ограничен allowlist. Попытка обратиться на другой домен завершится ошибкой.
-- Планировщик имеет антиддос: `rate_limit` ограничивает частоту операций.
-- Экономические операции выполняются атомарно и проверяются на идемпотентность через ключ операции.
-
-## 13. Событийная модель
-- Триггеры: `on message`, `on join`, `on leave`, `on cron` и пользовательские события через `webhook_emit`.
-- Пример: `command "on_message"(ctx: object):` будет вызван при новых сообщениях, если настроено в админке.
-- Для cron используйте `schedule_every` или `schedule_once` внутри инициализационного блока.
-
-## 14. UI слой
-- Кнопки и формы описываются через `ui_form` и массивы кнопок в `message_send`.
-- Каждая кнопка имеет тип и полезную нагрузку. Проверяйте payload в обработчике через строгие типы.
-- Ответы форм возвращаются объектом с полями по идентификаторам полей.
-
-## 15. Совместимость и миграции
-- Скрипты версии 1.x можно обернуть в макросы совместимости. Включите режим миграции в настройках, чтобы подсказки указали несовместимые конструкции.
-- Все новые примеры используют единый синтаксис без `call` и без JSON-обёрток.
-- При обновлении проверяйте changelog и запускайте тестовый раннер для golden-тестов.
-
-## 16. Тестовый раннер
-- Команда раннера: `escript test my_script.escript`.
-- Golden-тесты описывайте в каталоге `tests/` рядом со скриптом: входные данные и ожидаемые ответы в plain-тексте.
-- Раннер поддерживает мокирование HTTP, времени и балансов для детерминированных проверок.
-
-## 17. Стиль и форматтер
-- Используйте два пробела. Одна инструкция в строке.
-- Максимальная длина строки 100 символов. Переносите аргументы вертикально.
-- Форматтер можно вызвать через `escript fmt file.escript`.
-- Линтер сообщает о неиспользуемых переменных, неявных типах и запрещённых вызовах.
-
-## 18. Префиксы и справка
-- Префикс выбирается в настройках группы. Команды в коде указываются без префикса.
-- В `!!помощь` скриптовые команды отображаются внизу в отдельной категории. Если скрипт выключен или с ошибкой, команды пропадают.
-- Если описание не задано в сигнатуре, выводится текст "Описание отсутствует".
-
-## 19. Справочник встроенных функций
-Ниже приведены все встроенные функции с сигнатурами, описанием и примером использования. Все вызовы используют единый синтаксис `name(args)` без call.
-
-### Переменные и типы
-- **var_unset(name: string) -> void**
-  - Удаляет переменную из ближайшего scope.
-  - Пример: `var_unset("temp")`
-
-- **var_exists(name: string) -> bool**
-  - Проверяет, доступна ли переменная и не равна ли undefined.
-  - Пример: `if var_exists("temp"):`
-
-- **type_of(value: any) -> string**
-  - Возвращает тип: number|string|bool|array|object|null|undefined.
-  - Пример: `set t = type_of(value)`
-
-- **to_number(value: any, default: number|null=null) -> number|null**
-  - Безопасно приводит к числу.
-  - Пример: `let n: number|null = to_number(arg)`
-
-- **to_string(value: any) -> string**
-  - Преобразует любое значение в строку.
-  - Пример: `message_send(chat, to_string(value))`
-
-- **to_bool(value: any) -> bool**
-  - Приводит к bool по строкам true/false/1/0/yes/no.
-  - Пример: `if to_bool(flag): log("info", "flag on")`
-
-
-### JSON
-- **json_parse(text: string) -> object|array|null**
-  - Парсит JSON. При ошибке возвращает null и создаёт запись об ошибке.
-  - Пример: `let data: object|null = json_parse(raw)`
-
-- **json_stringify(value: any, pretty: bool=false) -> string**
-  - Сериализует значение в JSON.
-  - Пример: `set body = json_stringify(payload, true)`
-
-
-### Массивы
-- **array_new(...values: any[]) -> array**
-  - Создаёт массив.
-  - Пример: `let xs: array = array_new(1,2,3)`
-
-- **array_push(arr_ref: array, value: any) -> number**
-  - Добавляет элемент и возвращает длину.
-  - Пример: `array_push(xs, 4)`
-
-- **array_pop(arr_ref: array, default: any=null) -> any**
-  - Снимает последний элемент или default.
-  - Пример: `let last: any = array_pop(xs, null)`
-
-- **array_get(arr: array, index: number, default: any=null) -> any**
-  - Возвращает элемент по индексу, поддерживает отрицательные индексы.
-  - Пример: `set first = array_get(xs, 0)`
-
-- **array_set(arr_ref: array, index: number, value: any) -> void**
-  - Устанавливает значение, растягивая массив при необходимости.
-  - Пример: `array_set(xs, 5, 99)`
-
-- **array_len(arr: array) -> number**
-  - Возвращает длину.
-  - Пример: `let size: number = array_len(xs)`
-
-- **array_slice(arr: array, from: number=0, to: number=len) -> array**
-  - Создаёт срез.
-  - Пример: `let part: array = array_slice(xs, 1, 3)`
-
-- **array_join(arr: array, sep: string=",") -> string**
-  - Объединяет элементы в строку.
-  - Пример: `message_send(chat, array_join(xs, ";"))`
-
-- **array_unique(arr: array) -> array**
-  - Удаляет дубликаты по строгому равенству.
-  - Пример: `set uniq = array_unique(xs)`
-
-- **array_shuffle(arr_ref: array, seed: number|null=null) -> array**
-  - Перемешивает массив. При seed результат детерминирован.
-  - Пример: `array_shuffle(xs, 42)`
-
-- **array_contains(arr: array, value: any) -> bool**
-  - Проверяет наличие элемента.
-  - Пример: `if array_contains(xs, 5): ...`
-
-
-### Объекты
-- **map_new(pairs: array|null=null) -> object**
-  - Создаёт объект. Пары можно передать как [[k,v], ...].
-  - Пример: `let obj: object = map_new()`
-
-- **map_get(obj: object, key: string, default: any=null) -> any**
-  - Получает значение по ключу.
-  - Пример: `let name: string = map_get(obj, "name", "?")`
-
-- **map_set(obj_ref: object, key: string, value: any) -> void**
-  - Устанавливает значение.
-  - Пример: `map_set(obj, "age", 30)`
-
-- **map_del(obj_ref: object, key: string) -> bool**
-  - Удаляет ключ. Возвращает true при удалении.
-  - Пример: `map_del(obj, "temp")`
-
-- **map_keys(obj: object) -> array<string>**
-  - Возвращает массив ключей.
-  - Пример: `let keys: array = map_keys(obj)`
-
-- **map_values(obj: object) -> array<any>**
-  - Возвращает массив значений.
-  - Пример: `let vals: array = map_values(obj)`
-
-- **map_has(obj: object, key: string) -> bool**
-  - Проверяет наличие ключа.
-  - Пример: `if map_has(obj, "name"): ...`
-
-- **map_merge(a: object, b: object, mode: string="overwrite") -> object**
-  - Объединяет объекты. Режимы: overwrite, keep, deep.
-  - Пример: `let merged: object = map_merge(a, b, "deep")`
-
-
-### Поток
-- **switch(value: any, cases: array<{when:any, actions:any}>, default_actions: array=[]) -> void**
-  - Выполняет actions первой совпавшей ветки. Поддерживает match_regex.
-  - Пример: `await switch(color, cases, [])`
-
-- **while_loop(condition: expr, actions: array, max_iter: number=1000) -> void**
-  - Цикл while с лимитом итераций.
-  - Пример: `await while_loop(i < 10, actions)`
-
-- **for_loop(var_name: string, from: number, to: number, step: number=1, actions: array, max_iter: number=10000) -> void**
-  - Цикл for по диапазону с защитой от step=0.
-  - Пример: `await for_loop("i", 0, 5, 1, actions)`
-
-- **foreach(var_name: string, arr: array, actions: array, max_iter: number=10000) -> void**
-  - Перебор элементов массива.
-  - Пример: `await foreach("item", items, actions)`
-
-- **break() -> void**
-  - Останавливает текущий цикл.
-  - Пример: `break()`
-
-- **continue() -> void**
-  - Переходит к следующей итерации.
-  - Пример: `continue()`
-
-- **try_catch(actions: array, catch_var: string="error", catch_actions: array) -> void**
-  - Блок try/catch.
-  - Пример: `await try_catch(main_actions, "err", handler)`
-
-
-### Время
-- **time_now() -> number**
-  - Возвращает Unix time в секундах.
-  - Пример: `let now: number = time_now()`
-
-- **time_today(tz: string|null=null) -> number**
-  - Индекс дня с учётом tz.
-  - Пример: `let day: number = time_today(null)`
-
-- **time_parse(text: string, tz: string|null=null) -> number|null**
-  - Парсит ISO даты/времени.
-  - Пример: `let ts: number|null = time_parse("2024-01-01")`
-
-- **time_format(ts: number, format: string="YYYY-MM-DD HH:mm", tz: string|null=null) -> string**
-  - Форматирует таймстамп.
-  - Пример: `message_send(chat, time_format(ts))`
-
-- **time_add_days(ts: number, days: number) -> number**
-  - Добавляет дни.
-  - Пример: `set future = time_add_days(now, 3)`
-
-- **time_diff_days(a: number, b: number) -> number**
-  - Разница в днях.
-  - Пример: `let diff: number = time_diff_days(a, b)`
-
-
-### Планировщик
-- **schedule_once(ts: number, actions: any, id: string|null=null) -> string**
-  - Запускает одноразовый таймер.
-  - Пример: `let id: string = schedule_once(time_add_days(time_now(),1), actions)`
-
-- **schedule_every(cron: string, actions: any, id: string|null=null, tz: string|null=null) -> string**
-  - Cron планировщик.
-  - Пример: `let job: string = schedule_every("0 9 * * *", actions)`
-
-- **schedule_cancel(id: string) -> bool**
-  - Отменяет задачу.
-  - Пример: `schedule_cancel(job)`
-
-- **schedule_list(prefix: string|null=null) -> array**
-  - Возвращает активные задачи.
-  - Пример: `let jobs: array = schedule_list(null)`
-
-
-### Экономика
-- **balance_get(user_id: string) -> number**
-  - Возвращает баланс пользователя.
-  - Пример: `let bal: number = balance_get(user_id(ctx))`
-
-- **balance_can_remove(user_id: string, amount: number) -> bool**
-  - Проверяет возможность списания.
-  - Пример: `if not balance_can_remove(uid, cost): return`
-
-- **balance_add(user_id: string, amount: number, reason: string|null=null) -> void**
-  - Начисляет средства.
-  - Пример: `balance_add(uid, reward, "bonus")`
-
-- **balance_remove(user_id: string, amount: number, reason: string|null=null) -> bool**
-  - Списывает с проверкой.
-  - Пример: `balance_remove(uid, bet, "bet")`
-
-- **balance_transfer_atomic(from_id: string, to_id: string, amount: number, reason: string|null=null) -> bool**
-  - Атомарный перевод.
-  - Пример: `balance_transfer_atomic(a,b,10,"tip")`
-
-- **economy_lock(scope: string, key: string, seconds: number=5) -> bool**
-  - Блокировка по scope: user|chat|global.
-  - Пример: `economy_lock("user", uid, 5)`
-
-- **economy_unlock(scope: string, key: string) -> void**
-  - Снимает блокировку.
-  - Пример: `economy_unlock("user", uid)`
-
-- **treasury_get() -> number**
-  - Получает баланс казны.
-  - Пример: `let bank: number = treasury_get()`
-
-- **treasury_add(amount: number, reason: string|null=null) -> void**
-  - Пополнение казны.
-  - Пример: `treasury_add(50, "event")`
-
-- **treasury_remove(amount: number, reason: string|null=null) -> bool**
-  - Списание из казны.
-  - Пример: `treasury_remove(20, "payout")`
-
-
-### Хранилище и транзакции
-- **kv_incr(key: string, delta: number=1, init: number=0) -> number**
-  - Инкремент volatile ключа.
-  - Пример: `let val: number = kv_incr("visits")`
-
-- **persist_incr(user_id: string, key: string, delta: number=1, init: number=0) -> number**
-  - Инкремент user storage.
-  - Пример: `persist_incr(uid, "score", 1)`
-
-- **kv_set_ttl(key: string, value: any, seconds: number) -> void**
-  - Устанавливает значение с TTL.
-  - Пример: `kv_set_ttl("otp", code, 300)`
-
-- **kv_get_meta(key: string) -> object**
-  - Возвращает exists, expires_at, type, size.
-  - Пример: `let meta: object = kv_get_meta("otp")`
-
-- **kv_list(prefix: string, limit: number=100, cursor: string|null=null) -> object**
-  - Постраничный список ключей.
-  - Пример: `let page: object = kv_list("session:", 50, null)`
-
-- **persist_list(user_id: string, prefix: string, limit: number=100, cursor: string|null=null) -> object**
-  - Листинг user storage.
-  - Пример: `let page2: object = persist_list(uid, "notes:", 20, null)`
-
-- **db_transaction(ops: array<op>) -> object**
-  - Атомарный пакет операций set/del/incr/ttl.
-  - Пример: `db_transaction([{"op":"set","key":"a","value":1}])`
-
-
-### Текст
-- **text_lower(text: string) -> string**
-  - Приводит к нижнему регистру.
-  - Пример: `set low = text_lower(name)`
-
-- **text_upper(text: string) -> string**
-  - Приводит к верхнему регистру.
-  - Пример: `text_upper(code)`
-
-- **text_trim(text: string) -> string**
-  - Убирает пробелы по краям.
-  - Пример: `text_trim(input)`
-
-- **text_replace(text: string, from: string|regex, to: string) -> string**
-  - Заменяет подстроку или regex.
-  - Пример: `text_replace(msg, "foo", "bar")`
-
-- **text_split(text: string, sep: string|regex, limit: number|null=null) -> array<string>**
-  - Разбивает строку.
-  - Пример: `let parts: array = text_split(msg, " ")`
-
-- **text_regex_match(text: string, pattern: string, flags: string="") -> object|null**
-  - Ищет совпадение regex.
-  - Пример: `let m: object|null = text_regex_match(msg, "^id:(\d+)")`
-
-- **text_regex_findall(text: string, pattern: string, flags: string="") -> array**
-  - Находит все совпадения.
-  - Пример: `let hits: array = text_regex_findall(msg, "@([a-z]+)", "gi")`
-
-- **text_format(template: string, values: object) -> string**
-  - Форматирует строку по ключам.
-  - Пример: `text_format("Привет, {user}", {"user":name})`
-
-
-### Команды и пользователи
-- **command_args(raw_text: string|null=null) -> array<string>**
-  - Разбивает аргументы, учитывая кавычки.
-  - Пример: `let args: array = command_args(null)`
-
-- **command_arg(index: number, default: any=null) -> string|null**
-  - Получает аргумент по индексу.
-  - Пример: `set first = command_arg(0, "?")`
-
-- **command_parse_amount(text: string, allow_all: bool=true) -> object**
-  - Парсит суммы: 10, 1k, 2.5m, all.
-  - Пример: `let parsed: object = command_parse_amount(arg)`
-
-- **command_parse_user(text: string) -> string|null**
-  - Определяет пользователя по @, id или reply.
-  - Пример: `let target: string|null = command_parse_user(arg)`
-
-- **user_id(ctx) -> string**
-  - Возвращает id отправителя.
-  - Пример: `let uid: string = user_id(ctx)`
-
-- **user_name(user_id: string) -> string**
-  - Получает имя пользователя.
-  - Пример: `user_name(uid)`
-
-- **user_mention(user_id: string) -> string**
-  - Создаёт упоминание.
-  - Пример: `message_send(chat, user_mention(uid))`
-
-- **chat_id(ctx) -> string**
-  - ID текущего чата.
-  - Пример: `let cid: string = chat_id(ctx)`
-
-- **chat_title(ctx) -> string**
-  - Название чата.
-  - Пример: `chat_title(ctx)`
-
-- **user_role(user_id: string) -> string**
-  - Роль пользователя.
-  - Пример: `if user_role(uid) == "admin": ...`
-
-- **permissions_has(user_id: string, perm: string) -> bool**
-  - Проверяет права.
-  - Пример: `if permissions_has(uid, "ban"): ...`
-
-- **members_random(chat_id: string, count: number=1, filter: object|null=null) -> array<string>**
-  - Выбирает случайных участников.
-  - Пример: `let picks: array = members_random(chat_id(ctx), 2, {"not_bot":true})`
-
-- **members_list(chat_id: string, filter: object|null=null, limit: number=200, cursor: string|null=null) -> object**
-  - Листинг участников.
-  - Пример: `let page: object = members_list(chat_id(ctx), null, 50, null)`
-
-
-### UI и сообщения
-- **ui_form(fields: array, title: string="") -> object**
-  - Создаёт форму ввода.
-  - Пример: `let form: object = ui_form([{"type":"text","name":"code"}], "Введите код")`
-
-- **message_send(chat_id: string, text: string, buttons: array|null=null, reply_to: string|null=null) -> string**
-  - Отправляет сообщение, возвращает message_id.
-  - Пример: `let mid: string = message_send(chat_id(ctx), "hi", null, null)`
-
-- **message_edit(message_id: string, text: string, buttons: array|null=null) -> bool**
-  - Редактирует сообщение.
-  - Пример: `message_edit(mid, "updated", null)`
-
-- **message_delete(message_id: string) -> bool**
-  - Удаляет сообщение.
-  - Пример: `message_delete(mid)`
-
-- **pin_set(chat_id: string, message_id: string) -> bool**
-  - Закрепляет сообщение.
-  - Пример: `pin_set(chat_id(ctx), mid)`
-
-- **pin_clear(chat_id: string) -> bool**
-  - Снимает закреп.
-  - Пример: `pin_clear(chat_id(ctx))`
-
-- **pin_get(chat_id: string) -> string|null**
-  - Получает id закрепа.
-  - Пример: `let pid: string|null = pin_get(chat_id(ctx))`
-
-- **thread_storage(scope_id: string, key: string, value: any, ttl: number|null=null) -> void**
-  - Сохраняет состояние ветки.
-  - Пример: `thread_storage(chat_id(ctx), "step", 1, 600)`
-
-- **thread_storage_get(scope_id: string, key: string, default: any=null) -> any**
-  - Читает состояние ветки.
-  - Пример: `let step: any = thread_storage_get(chat_id(ctx), "step", 0)`
-
-- **thread_storage_del(scope_id: string, key: string) -> bool**
-  - Удаляет состояние.
-  - Пример: `thread_storage_del(chat_id(ctx), "step")`
-
-
-### HTTP и крипто
-- **http_get(url: string, headers: object|null=null, timeout_ms: number=5000) -> object**
-  - HTTP GET. Возвращает status, headers, body.
-  - Пример: `let resp: object = http_get("https://api.example.com")`
-
-- **http_post(url: string, json: any, headers: object|null=null, timeout_ms: number=5000) -> object**
-  - HTTP POST с JSON.
-  - Пример: `http_post("https://api", {"a":1}, null, 3000)`
-
-- **http_request(method: string, url: string, headers: object|null=null, body: any=null, timeout_ms: number=5000) -> object**
-  - Универсальный HTTP.
-  - Пример: `http_request("PUT", url, {"X":"1"}, body, 2000)`
-
-- **webhook_emit(event: string, payload: any) -> bool**
-  - Отправляет вебхук на разрешённый URL.
-  - Пример: `webhook_emit("payment", {"id":123})`
-
-- **crypto_hmac_sha256(text: string, secret: string, output: string="hex") -> string**
-  - HMAC SHA256.
-  - Пример: `let sig: string = crypto_hmac_sha256(body, secret, "hex")`
-
-- **crypto_sha256(text: string, output: string="hex") -> string**
-  - SHA256.
-  - Пример: `crypto_sha256("abc")`
-
-- **rate_limit(key: string, per_seconds: number, limit: number) -> bool**
-  - Возвращает true если лимит не превышен.
-  - Пример: `if not rate_limit("cmd:uid", 60, 5): return`
-
-
-### Логи и метрики
-- **log(level: string, message: string, data: any|null=null) -> void**
-  - Структурный лог.
-  - Пример: `log("info", "started", {"cmd":command})`
-
-- **assert_(condition: bool, message: string="assert_failed") -> void**
-  - Выбрасывает ошибку если условие ложно.
-  - Пример: `assert_(user != null, "user_required")`
-
-- **metrics_incr(name: string, value: number=1, tags: object|null=null) -> void**
-  - Инкремент метрики.
-  - Пример: `metrics_incr("bets", 1, {"game":"slots"})`
-
-- **error_last() -> object|null**
-  - Возвращает последнюю ошибку рантайма.
-  - Пример: `let last = error_last()`
-
-## 20. Практические рецепты
-
-### Hello
-```
-command "hello"():
-  message_send(chat_id(ctx), "Привет")
-```
-
-### Пари
-```
-command "bet"(amount: number):
-  if not balance_can_remove(user_id(ctx), amount):
-    message_send(chat_id(ctx), "Нет средств")
-    return
-  balance_remove(user_id(ctx), amount, "bet")
-  message_send(chat_id(ctx), "Ставка принята")
-```
-
-### Форма ввода
-```
-command "ask"():
-  let form: object = ui_form([{"type":"text","name":"city","title":"Город"}], "Укажите город")
-  message_send(chat_id(ctx), "Форма отправлена")
-```
-
-### Расписание
-```
-command "daily"():
-  schedule_every("0 10 * * *", [{"do":"message_send","args":[chat_id(ctx),"Доброе утро"]}])
-```
-
-### HTTP
-```
-command "check"():
-  let resp: object = http_get("https://api.github.com")
-  message_send(chat_id(ctx), to_string(resp.status))
-```
-## 21. Чеклист перед загрузкой
-- Файл сохранён с суффиксом .escript.
-- Команды имеют описания. Если нет, будет показано "Описание отсутствует".
-- Отступы только два пробела.
-- Сигнатуры параметров указаны с типами.
-- Нет запретных доменов в HTTP запросах.
-- Тестовый раннер проходит все сценарии.
-- Макросы разворачиваются без ошибок.
-- Проверены лимиты памяти и времени.
-
-## 22. Лучшие практики
-- Разделяйте код по модулям и используйте неймспейсы.
-- Используйте строгие типы вместо any.
-- Сохраняйте идемпотентные ключи для экономических операций.
-- Логируйте каждое внешнее обращение и ошибку.
-- Не держите блокировки дольше необходимого времени.
-- Ставьте seed при тестируемом рандоме.
-- Используйте форматтер перед коммитом.
-
-## 23. Антипаттерны
-- Хранить секреты в открытом виде в скрипте.
-- Писать вложенные if без вынесения в функции.
-- Использовать error_last как контроль потока.
-- Игнорировать результат balance_remove.
-- Ссылаться на переменные после var_unset.
-
-## 24. Миграция 1.x -> 2.x
-Шаги миграции:
-- Удалите JSON actions. Оставьте только .escript.
-- Замените конструкции call/type/actions на чистые выражения.
-- Объявите типы параметров и возвращаемых значений.
-- Проверьте справку команд: они теперь берут описания из сигнатур.
-- Запустите линтер и форматтер.
-- Обновите макросы и убедитесь, что они не используют устаревшие поля.
-
-## 25. Подробные примеры по категориям
-### Пример 1: Работа с коллекциями 1
-```
-command "demo_1"():
-  let xs: array = [1,2,3,4]
-  array_shuffle(xs, 123)
-  let text: string = array_join(xs, ", ")
-  message_send(chat_id(ctx), text)
-```
-
-### Пример 2: Работа с коллекциями 2
-```
-command "demo_2"():
-  let xs: array = [1,2,3,4]
-  array_shuffle(xs, 123)
-  let text: string = array_join(xs, ", ")
-  message_send(chat_id(ctx), text)
-```
-
-### Пример 3: Работа с коллекциями 3
-```
-command "demo_3"():
-  let xs: array = [1,2,3,4]
-  array_shuffle(xs, 123)
-  let text: string = array_join(xs, ", ")
-  message_send(chat_id(ctx), text)
-```
-
-### Пример 4: Работа с коллекциями 4
-```
-command "demo_4"():
-  let xs: array = [1,2,3,4]
-  array_shuffle(xs, 123)
-  let text: string = array_join(xs, ", ")
-  message_send(chat_id(ctx), text)
-```
-
-### Пример 5: Работа с коллекциями 5
-```
-command "demo_5"():
-  let xs: array = [1,2,3,4]
-  array_shuffle(xs, 123)
-  let text: string = array_join(xs, ", ")
-  message_send(chat_id(ctx), text)
-```
-
-### Пример 6: Работа с коллекциями 6
-```
-command "demo_6"():
-  let xs: array = [1,2,3,4]
-  array_shuffle(xs, 123)
-  let text: string = array_join(xs, ", ")
-  message_send(chat_id(ctx), text)
-```
-
-### Пример 7: Работа с коллекциями 7
-```
-command "demo_7"():
-  let xs: array = [1,2,3,4]
-  array_shuffle(xs, 123)
-  let text: string = array_join(xs, ", ")
-  message_send(chat_id(ctx), text)
-```
-
-### Пример 8: Работа с коллекциями 8
-```
-command "demo_8"():
-  let xs: array = [1,2,3,4]
-  array_shuffle(xs, 123)
-  let text: string = array_join(xs, ", ")
-  message_send(chat_id(ctx), text)
-```
-
-### Пример 9: Работа с коллекциями 9
-```
-command "demo_9"():
-  let xs: array = [1,2,3,4]
-  array_shuffle(xs, 123)
-  let text: string = array_join(xs, ", ")
-  message_send(chat_id(ctx), text)
-```
-
-### Пример 10: Работа с коллекциями 10
-```
-command "demo_10"():
-  let xs: array = [1,2,3,4]
-  array_shuffle(xs, 123)
-  let text: string = array_join(xs, ", ")
-  message_send(chat_id(ctx), text)
-```
-
-### Пример 11: Работа с коллекциями 11
-```
-command "demo_11"():
-  let xs: array = [1,2,3,4]
-  array_shuffle(xs, 123)
-  let text: string = array_join(xs, ", ")
-  message_send(chat_id(ctx), text)
-```
-
-### Пример 12: Работа с коллекциями 12
-```
-command "demo_12"():
-  let xs: array = [1,2,3,4]
-  array_shuffle(xs, 123)
-  let text: string = array_join(xs, ", ")
-  message_send(chat_id(ctx), text)
-```
-
-### Пример 13: Работа с коллекциями 13
-```
-command "demo_13"():
-  let xs: array = [1,2,3,4]
-  array_shuffle(xs, 123)
-  let text: string = array_join(xs, ", ")
-  message_send(chat_id(ctx), text)
-```
-
-### Пример 14: Работа с коллекциями 14
-```
-command "demo_14"():
-  let xs: array = [1,2,3,4]
-  array_shuffle(xs, 123)
-  let text: string = array_join(xs, ", ")
-  message_send(chat_id(ctx), text)
-```
-
-### Пример 15: Работа с коллекциями 15
-```
-command "demo_15"():
-  let xs: array = [1,2,3,4]
-  array_shuffle(xs, 123)
-  let text: string = array_join(xs, ", ")
-  message_send(chat_id(ctx), text)
-```
-
-## 26. Подробные примеры по экономике
-### Экономика 1
-```
-command "payout_1"(amount: number):
-  if not economy_lock("user", user_id(ctx), 5):
-    message_send(chat_id(ctx), "Повторите позже")
-    return
-  try:
-    if balance_can_remove(user_id(ctx), amount):
-      balance_remove(user_id(ctx), amount, "case_1")
-      treasury_add(amount, "payout_1")
-      message_send(chat_id(ctx), "Готово")
-    else:
-      message_send(chat_id(ctx), "Недостаточно")
-  catch err:
-    log("error", "fail", err)
-  finally:
-    economy_unlock("user", user_id(ctx))
-```
-
-### Экономика 2
-```
-command "payout_2"(amount: number):
-  if not economy_lock("user", user_id(ctx), 5):
-    message_send(chat_id(ctx), "Повторите позже")
-    return
-  try:
-    if balance_can_remove(user_id(ctx), amount):
-      balance_remove(user_id(ctx), amount, "case_2")
-      treasury_add(amount, "payout_2")
-      message_send(chat_id(ctx), "Готово")
-    else:
-      message_send(chat_id(ctx), "Недостаточно")
-  catch err:
-    log("error", "fail", err)
-  finally:
-    economy_unlock("user", user_id(ctx))
-```
-
-### Экономика 3
-```
-command "payout_3"(amount: number):
-  if not economy_lock("user", user_id(ctx), 5):
-    message_send(chat_id(ctx), "Повторите позже")
-    return
-  try:
-    if balance_can_remove(user_id(ctx), amount):
-      balance_remove(user_id(ctx), amount, "case_3")
-      treasury_add(amount, "payout_3")
-      message_send(chat_id(ctx), "Готово")
-    else:
-      message_send(chat_id(ctx), "Недостаточно")
-  catch err:
-    log("error", "fail", err)
-  finally:
-    economy_unlock("user", user_id(ctx))
-```
+# EScript JSON Runtime: полная спецификация (актуальная)
 
-### Экономика 4
-```
-command "payout_4"(amount: number):
-  if not economy_lock("user", user_id(ctx), 5):
-    message_send(chat_id(ctx), "Повторите позже")
-    return
-  try:
-    if balance_can_remove(user_id(ctx), amount):
-      balance_remove(user_id(ctx), amount, "case_4")
-      treasury_add(amount, "payout_4")
-      message_send(chat_id(ctx), "Готово")
-    else:
-      message_send(chat_id(ctx), "Недостаточно")
-  catch err:
-    log("error", "fail", err)
-  finally:
-    economy_unlock("user", user_id(ctx))
-```
-
-### Экономика 5
-```
-command "payout_5"(amount: number):
-  if not economy_lock("user", user_id(ctx), 5):
-    message_send(chat_id(ctx), "Повторите позже")
-    return
-  try:
-    if balance_can_remove(user_id(ctx), amount):
-      balance_remove(user_id(ctx), amount, "case_5")
-      treasury_add(amount, "payout_5")
-      message_send(chat_id(ctx), "Готово")
-    else:
-      message_send(chat_id(ctx), "Недостаточно")
-  catch err:
-    log("error", "fail", err)
-  finally:
-    economy_unlock("user", user_id(ctx))
-```
-
-### Экономика 6
-```
-command "payout_6"(amount: number):
-  if not economy_lock("user", user_id(ctx), 5):
-    message_send(chat_id(ctx), "Повторите позже")
-    return
-  try:
-    if balance_can_remove(user_id(ctx), amount):
-      balance_remove(user_id(ctx), amount, "case_6")
-      treasury_add(amount, "payout_6")
-      message_send(chat_id(ctx), "Готово")
-    else:
-      message_send(chat_id(ctx), "Недостаточно")
-  catch err:
-    log("error", "fail", err)
-  finally:
-    economy_unlock("user", user_id(ctx))
-```
-
-### Экономика 7
-```
-command "payout_7"(amount: number):
-  if not economy_lock("user", user_id(ctx), 5):
-    message_send(chat_id(ctx), "Повторите позже")
-    return
-  try:
-    if balance_can_remove(user_id(ctx), amount):
-      balance_remove(user_id(ctx), amount, "case_7")
-      treasury_add(amount, "payout_7")
-      message_send(chat_id(ctx), "Готово")
-    else:
-      message_send(chat_id(ctx), "Недостаточно")
-  catch err:
-    log("error", "fail", err)
-  finally:
-    economy_unlock("user", user_id(ctx))
-```
-
-### Экономика 8
-```
-command "payout_8"(amount: number):
-  if not economy_lock("user", user_id(ctx), 5):
-    message_send(chat_id(ctx), "Повторите позже")
-    return
-  try:
-    if balance_can_remove(user_id(ctx), amount):
-      balance_remove(user_id(ctx), amount, "case_8")
-      treasury_add(amount, "payout_8")
-      message_send(chat_id(ctx), "Готово")
-    else:
-      message_send(chat_id(ctx), "Недостаточно")
-  catch err:
-    log("error", "fail", err)
-  finally:
-    economy_unlock("user", user_id(ctx))
-```
-
-### Экономика 9
-```
-command "payout_9"(amount: number):
-  if not economy_lock("user", user_id(ctx), 5):
-    message_send(chat_id(ctx), "Повторите позже")
-    return
-  try:
-    if balance_can_remove(user_id(ctx), amount):
-      balance_remove(user_id(ctx), amount, "case_9")
-      treasury_add(amount, "payout_9")
-      message_send(chat_id(ctx), "Готово")
-    else:
-      message_send(chat_id(ctx), "Недостаточно")
-  catch err:
-    log("error", "fail", err)
-  finally:
-    economy_unlock("user", user_id(ctx))
-```
-
-### Экономика 10
-```
-command "payout_10"(amount: number):
-  if not economy_lock("user", user_id(ctx), 5):
-    message_send(chat_id(ctx), "Повторите позже")
-    return
-  try:
-    if balance_can_remove(user_id(ctx), amount):
-      balance_remove(user_id(ctx), amount, "case_10")
-      treasury_add(amount, "payout_10")
-      message_send(chat_id(ctx), "Готово")
-    else:
-      message_send(chat_id(ctx), "Недостаточно")
-  catch err:
-    log("error", "fail", err)
-  finally:
-    economy_unlock("user", user_id(ctx))
-```
-
-## 27. UI паттерны
-### Форма 1
-```
-command "form_1"():
-  let form: object = ui_form([
-    {"type":"text","name":"field","title":"Поле 1"},
-    {"type":"number","name":"amount","title":"Сумма"}
-  ], "Форма 1")
-  message_send(chat_id(ctx), "Отправьте форму")
-```
-
-### Форма 2
-```
-command "form_2"():
-  let form: object = ui_form([
-    {"type":"text","name":"field","title":"Поле 2"},
-    {"type":"number","name":"amount","title":"Сумма"}
-  ], "Форма 2")
-  message_send(chat_id(ctx), "Отправьте форму")
-```
-
-### Форма 3
-```
-command "form_3"():
-  let form: object = ui_form([
-    {"type":"text","name":"field","title":"Поле 3"},
-    {"type":"number","name":"amount","title":"Сумма"}
-  ], "Форма 3")
-  message_send(chat_id(ctx), "Отправьте форму")
-```
-
-### Форма 4
-```
-command "form_4"():
-  let form: object = ui_form([
-    {"type":"text","name":"field","title":"Поле 4"},
-    {"type":"number","name":"amount","title":"Сумма"}
-  ], "Форма 4")
-  message_send(chat_id(ctx), "Отправьте форму")
-```
-
-### Форма 5
-```
-command "form_5"():
-  let form: object = ui_form([
-    {"type":"text","name":"field","title":"Поле 5"},
-    {"type":"number","name":"amount","title":"Сумма"}
-  ], "Форма 5")
-  message_send(chat_id(ctx), "Отправьте форму")
-```
-
-## 28. Трассировка и диагностика
-- Диагностический совет 1: включайте debug_trace перед сложными циклами.
-- Диагностический совет 2: включайте debug_trace перед сложными циклами.
-- Диагностический совет 3: включайте debug_trace перед сложными циклами.
-- Диагностический совет 4: включайте debug_trace перед сложными циклами.
-- Диагностический совет 5: включайте debug_trace перед сложными циклами.
-
-## 29. Золотые тесты
-- Тест 1: проверяйте синтаксис макросов и стабильность форматтера.
-- Тест 2: проверяйте синтаксис макросов и стабильность форматтера.
-- Тест 3: проверяйте синтаксис макросов и стабильность форматтера.
-- Тест 4: проверяйте синтаксис макросов и стабильность форматтера.
-- Тест 5: проверяйте синтаксис макросов и стабильность форматтера.
-- Тест 6: проверяйте синтаксис макросов и стабильность форматтера.
-- Тест 7: проверяйте синтаксис макросов и стабильность форматтера.
-- Тест 8: проверяйте синтаксис макросов и стабильность форматтера.
-- Тест 9: проверяйте синтаксис макросов и стабильность форматтера.
-- Тест 10: проверяйте синтаксис макросов и стабильность форматтера.
-
-## 30. Полезные сниппеты для администраторов
-```
-command "admin_1"():
-  log("info", "admin check 1")
-  message_send(chat_id(ctx), "ok 1")
-```
-
-```
-command "admin_2"():
-  log("info", "admin check 2")
-  message_send(chat_id(ctx), "ok 2")
-```
-
-```
-command "admin_3"():
-  log("info", "admin check 3")
-  message_send(chat_id(ctx), "ok 3")
-```
-
-```
-command "admin_4"():
-  log("info", "admin check 4")
-  message_send(chat_id(ctx), "ok 4")
-```
-
-```
-command "admin_5"():
-  log("info", "admin check 5")
-  message_send(chat_id(ctx), "ok 5")
-```
+Этот документ — главный справочник по JSON-скриптам `.escript.json` для mrpack.
 
-```
-command "admin_6"():
-  log("info", "admin check 6")
-  message_send(chat_id(ctx), "ok 6")
-```
+## 1. Принципы
+- Поддерживается **только JSON-формат** (файлы `.escript.json`).
+- DSL существует только для диагностики: **источник истины — JSON**.
+- Скриптовые команды **могут вызываться с любым префиксом** (не только `!!`).
+- Если команда написана неточно, но смысл понятен, система пытается выполнить **ближайшую по смыслу** команду.
+- Внутренние функции скрипта можно вызывать в выражениях: `get_bonus()`.
+- Константы из `consts` доступны **как обычные переменные** (например, `daily_bonus`).
 
-```
-command "admin_7"():
-  log("info", "admin check 7")
-  message_send(chat_id(ctx), "ok 7")
+## 2. Структура файла
+```json
+{
+  "imports": ["math", "text"],
+  "consts": {"tax": 5},
+  "functions": [/* ... */],
+  "commands": [/* ... */],
+  "events": [/* ... */],
+  "source": "опционально"
+}
 ```
 
-```
-command "admin_8"():
-  log("info", "admin check 8")
-  message_send(chat_id(ctx), "ok 8")
-```
+## 3. Типы
+- `number`: число (int/float)
+- `string`: строка
+- `bool`: логическое значение
+- `array`: массив
+- `object`: объект
+- `null`: пустое значение
+- `any`: любой тип
 
-```
-command "admin_9"():
-  log("info", "admin check 9")
-  message_send(chat_id(ctx), "ok 9")
-```
+## 4. Выражения (минимальный Lua-стиль)
+Поддерживаются:
+- Литералы: числа, строки, `true`/`false`, `null`
+- Переменные и константы
+- Арифметика: `+ - * / %`
+- Сравнения: `== != < <= > >=`
+- Логика: `and`, `or`, `not`
+- Индексация: `arr[0]`, `obj["key"]`
+- Атрибуты: `obj.key`
+- Вызов функций: `balance.get(user_id)`, `get_bonus()`
 
+## 5. Action-блоки (JSON)
+Ниже перечислены допустимые узлы действий и эквиваленты в DSL.
+
+### 5.1 let
+```json
+{"let": {"name": "x", "type": "number", "value": 10}}
+```
+DSL: `let x: number = 10`
+
+### 5.2 set
+```json
+{"set": {"name": "x", "value": 11}}
+```
+DSL: `set x = 11`
+
+### 5.3 call
+```json
+{"call": "message.send", "args": [{"expr": "chat.id(ctx)"}, "hello"]}
+```
+DSL: `call message.send(chat.id(ctx), "hello")`
+
+### 5.4 if / else
+```json
+{"if": "x > 0", "then": [...], "else": [...]}
+```
+DSL:
+```
+if x > 0:
+  ...
+else:
+  ...
+```
+
+### 5.5 while
+```json
+{"while": "i < 10", "body": [...]}
+```
+
+### 5.6 for (итерирование)
+```json
+{"for": {"var": "u", "in": "users"}, "body": [...]}
+```
+
+### 5.7 for_range
+```json
+{"for": {"var": "i", "from": 1, "to": 10, "step": 1}, "body": [...]}
+```
+
+### 5.8 try/catch/finally
+```json
+{"try": [...], "catch": [...], "catch_as": "err", "finally": [...]}
+```
+
+### 5.9 return / throw / break / continue
+```json
+{"return": {"expr": "value"}}
+```
+```json
+{"throw": {"expr": "error message"}}
+```
+```json
+{"break": true}
+```
+```json
+{"continue": true}
+```
+
+## 6. Команды, префиксы, неточности
+- Скриптовые команды ищутся **по смыслу** (fuzzy-match) и **без учёта регистра**.
+- Можно писать команды **с любым префиксом**: `!`, `/`, `.`, `>>>`, `#`, `?`, `//` и т.д.
+- Если команда имеет пробелы в имени, система сопоставляет **по началу полной фразы**.
+
+## 7. Пользовательские функции
+- Определяются в `functions` с полями `name`, `params`, `returns`, `actions`.
+- Внутри выражений можно вызывать напрямую: `get_bonus()`.
+- В `call` можно вызывать по имени: `{"call": "get_bonus"}`.
+
+## 8. События
+- События в `events` исполняются планировщиком (например, `daily`).
+
+## 9. Пространства имён и функции (полный список + мини-скрипт для каждой)
+
+### json.*
+- `json.parse(text: string) -> object|array`
+  - Мини-скрипт: `{"let": {"name": "data", "type": "object", "value": {"expr": "json.parse(raw)"}}}`
+- `json.stringify(value: any) -> string`
+  - Мини-скрипт: `{"let": {"name": "raw", "type": "string", "value": {"expr": "json.stringify(data)"}}}`
+
+### array.*
+- `array.new(items?: array) -> array` — создать массив.
+  - `{"let": {"name": "arr", "type": "array", "value": {"expr": "array.new([1,2,3])"}}}`
+- `array.len(arr: array) -> number` — длина массива.
+  - `{"let": {"name": "n", "type": "number", "value": {"expr": "array.len(arr)"}}}`
+- `array.get(arr: array, idx: number, default?: any) -> any` — получить элемент.
+  - `{"let": {"name": "first", "type": "any", "value": {"expr": "array.get(arr, 0)"}}}`
+- `array.set(arr: array, idx: number, value: any) -> array` — записать элемент.
+  - `{"call": "array.set", "args": [{"expr": "arr"}, 0, 99]}`
+- `array.push(arr: array, value: any) -> array` — добавить в конец.
+  - `{"call": "array.push", "args": [{"expr": "arr"}, "item"]}`
+- `array.pop(arr: array) -> any` — взять с конца.
+  - `{"let": {"name": "last", "type": "any", "value": {"expr": "array.pop(arr)"}}}`
+- `array.contains(arr: array, value: any) -> bool` — содержит ли элемент.
+  - `{"let": {"name": "has", "type": "bool", "value": {"expr": "array.contains(arr, 10)"}}}`
+- `array.join(arr: array, sep?: string) -> string` — склеить строки.
+  - `{"let": {"name": "csv", "type": "string", "value": {"expr": "array.join(arr, ',')"}}}`
+- `array.slice(arr: array, start?: number, end?: number) -> array` — срез.
+  - `{"let": {"name": "part", "type": "array", "value": {"expr": "array.slice(arr, 0, 3)"}}}`
+- `array.shuffle(arr: array) -> array` — перемешать.
+  - `{"call": "array.shuffle", "args": [{"expr": "arr"}]}`
+- `array.unique(arr: array) -> array` — уникальные значения.
+  - `{"let": {"name": "uniq", "type": "array", "value": {"expr": "array.unique(arr)"}}}`
+
+### map.*
+- `map.new(pairs?: array) -> object`
+  - `{"let": {"name": "m", "type": "object", "value": {"expr": "map.new()"}}}`
+- `map.get(obj: object, key: string, default?: any) -> any`
+  - `{"let": {"name": "val", "type": "any", "value": {"expr": "map.get(m, 'k', 0)"}}}`
+- `map.set(obj: object, key: string, value: any) -> object`
+  - `{"call": "map.set", "args": [{"expr": "m"}, "k", 1]}`
+- `map.del(obj: object, key: string) -> bool`
+  - `{"let": {"name": "removed", "type": "bool", "value": {"expr": "map.del(m, 'k')"}}}`
+- `map.has(obj: object, key: string) -> bool`
+  - `{"let": {"name": "exists", "type": "bool", "value": {"expr": "map.has(m, 'k')"}}}`
+- `map.keys(obj: object) -> array`
+  - `{"let": {"name": "keys", "type": "array", "value": {"expr": "map.keys(m)"}}}`
+- `map.values(obj: object) -> array`
+  - `{"let": {"name": "vals", "type": "array", "value": {"expr": "map.values(m)"}}}`
+- `map.merge(a: object, b: object, mode?: string) -> object`
+  - `{"let": {"name": "merged", "type": "object", "value": {"expr": "map.merge(a, b, 'overwrite')"}}}`
+
+### text.*
+- `text.format(template: string, args?: array|object) -> string`
+  - `{"let": {"name": "t", "type": "string", "value": {"expr": "text.format('Hi {name}', {\"name\": \"Alex\"})"}}}`
+- `text.lower(text: string) -> string`
+  - `{"let": {"name": "lower", "type": "string", "value": {"expr": "text.lower('ABC')"}}}`
+- `text.upper(text: string) -> string`
+  - `{"let": {"name": "upper", "type": "string", "value": {"expr": "text.upper('abc')"}}}`
+- `text.trim(text: string) -> string`
+  - `{"let": {"name": "clean", "type": "string", "value": {"expr": "text.trim('  ok  ')"}}}`
+- `text.replace(text: string, old: string, new: string) -> string`
+  - `{"let": {"name": "rep", "type": "string", "value": {"expr": "text.replace('a-b', '-', ':')"}}}`
+- `text.split(text: string, sep: string) -> array`
+  - `{"let": {"name": "parts", "type": "array", "value": {"expr": "text.split('a,b', ',')"}}}`
+- `text.regex_match(text: string, pattern: string, flags?: string) -> bool`
+  - `{"let": {"name": "ok", "type": "bool", "value": {"expr": "text.regex_match('abc', 'a.+')"}}}`
+- `text.regex_findall(text: string, pattern: string, flags?: string) -> array`
+  - `{"let": {"name": "hits", "type": "array", "value": {"expr": "text.regex_findall('a1 a2', 'a\\d+')"}}}`
+
+### math.*
+- В namespace `math` нет одиночных функций: используются автогенерируемые функции `math.add_N`, `math.sub_N`, `math.mul_N`, `math.div_N`.
+  - `{"let": {"name": "x", "type": "number", "value": {"expr": "math.add_5(10)"}}}`
+
+### command.*
+- `command.args(raw_text?: string) -> array`
+  - `{"let": {"name": "args", "type": "array", "value": {"expr": "command.args()"}}}`
+- `command.arg(index: number, default?: any, raw_text?: string) -> any`
+  - `{"let": {"name": "first", "type": "any", "value": {"expr": "command.arg(0, null)"}}}`
+- `command.parse_amount(text: string, allow_all?: bool) -> object`
+  - `{"let": {"name": "parsed", "type": "object", "value": {"expr": "command.parse_amount('10k')"}}}`
+- `command.parse_user(text: string) -> string|null`
+  - `{"let": {"name": "uid", "type": "string", "value": {"expr": "command.parse_user('@user')"}}}`
+
+### user.*
+- `user.id(ctx?: any) -> string`
+  - `{"let": {"name": "uid", "type": "string", "value": {"expr": "user.id(ctx)"}}}`
+- `user.name(user_id: string) -> string`
+  - `{"let": {"name": "uname", "type": "string", "value": {"expr": "user.name(user.id(ctx))"}}}`
+- `user.mention(user_id: string) -> string`
+  - `{"let": {"name": "mention", "type": "string", "value": {"expr": "user.mention(user.id(ctx))"}}}`
+- `user.role(user_id: string) -> string`
+  - `{"let": {"name": "role", "type": "string", "value": {"expr": "user.role(user.id(ctx))"}}}`
+
+### chat.*
+- `chat.id(ctx?: any) -> string`
+  - `{"let": {"name": "cid", "type": "string", "value": {"expr": "chat.id(ctx)"}}}`
+- `chat.title(ctx?: any) -> string`
+  - `{"let": {"name": "title", "type": "string", "value": {"expr": "chat.title(ctx)"}}}`
+
+### permissions.*
+- `permissions.has(user_id: string, perm: string) -> bool`
+  - `{"let": {"name": "allowed", "type": "bool", "value": {"expr": "permissions.has(user.id(ctx), 'admin')"}}}`
+
+### members.*
+- `members.list() -> array`
+  - `{"let": {"name": "members", "type": "array", "value": {"expr": "members.list()"}}}`
+- `members.random(count?: number) -> array`
+  - `{"let": {"name": "pick", "type": "array", "value": {"expr": "members.random(3)"}}}`
+
+### ui.*
+- `ui.form(fields: array, submit?: string) -> string`
+  - `{"let": {"name": "form_id", "type": "string", "value": {"expr": "ui.form([{"name":"age","label":"Возраст","type":"number"}], 'send')"}}}`
+- `ui.form_submit(form_id: string) -> object`
+  - `{"let": {"name": "payload", "type": "object", "value": {"expr": "ui.form_submit(form_id)"}}}`
+
+### message.*
+- `message.send(chat_id?: string, text?: string, buttons?: array, reply_to?: string) -> string`
+  - `{"call": "message.send", "args": [{"expr": "chat.id(ctx)"}, "Привет!"]}`
+- `message.edit(message_id: string, text: string, buttons?: array) -> bool`
+  - `{"call": "message.edit", "args": ["123", "Обновлено"]}`
+- `message.delete(message_id: string) -> bool`
+  - `{"call": "message.delete", "args": ["123"]}`
+- `message.pin(message_id: string, chat_id?: string, notify?: bool) -> bool`
+  - `{"call": "message.pin", "args": ["123", {"expr": "chat.id(ctx)"}, false]}`
+- `message.unpin(message_id: string, chat_id?: string) -> bool`
+  - `{"call": "message.unpin", "args": ["123", {"expr": "chat.id(ctx)"}]}`
+
+### pin.*
+- `pin.set(value: string) -> bool`
+  - `{"call": "pin.set", "args": ["state"]}`
+- `pin.get(default?: string) -> string`
+  - `{"let": {"name": "state", "type": "string", "value": {"expr": "pin.get('none')"}}}`
+- `pin.clear() -> bool`
+  - `{"call": "pin.clear"}`
+
+### thread.*
+- `thread.storage(key: string, value?: any) -> any`
+  - `{"call": "thread.storage", "args": ["ticket", 42]}`
+- `thread.storage_get(key: string, default?: any) -> any`
+  - `{"let": {"name": "ticket", "type": "any", "value": {"expr": "thread.storage_get('ticket', null)"}}}`
+- `thread.storage_del(key: string) -> bool`
+  - `{"call": "thread.storage_del", "args": ["ticket"]}`
+
+### time.*
+- `time.now() -> number` (unix-seconds)
+  - `{"let": {"name": "now", "type": "number", "value": {"expr": "time.now()"}}}`
+- `time.today() -> string` (YYYY-MM-DD)
+  - `{"let": {"name": "today", "type": "string", "value": {"expr": "time.today()"}}}`
+- `time.parse(text: string, tz?: string) -> number`
+  - `{"let": {"name": "ts", "type": "number", "value": {"expr": "time.parse('2024-01-01')"}}}`
+- `time.format(ts: number, pattern?: string, tz?: string) -> string`
+  - `{"let": {"name": "fmt", "type": "string", "value": {"expr": "time.format(time.now(), '%Y-%m-%d')"}}}`
+- `time.add_days(ts: number, days: number) -> number`
+  - `{"let": {"name": "tom", "type": "number", "value": {"expr": "time.add_days(time.now(), 1)"}}}`
+- `time.diff_days(a: number, b: number) -> number`
+  - `{"let": {"name": "diff", "type": "number", "value": {"expr": "time.diff_days(time.now(), time.add_days(time.now(), 3))"}}}`
+
+### schedule.*
+- `schedule.once(name: string, at: number, payload?: any) -> bool`
+  - `{"call": "schedule.once", "args": ["daily_bonus", {"expr": "time.add_days(time.now(), 1)"}]}`
+- `schedule.every(name: string, period: number, payload?: any) -> bool`
+  - `{"call": "schedule.every", "args": ["tick", 3600]}`
+- `schedule.cancel(name: string) -> bool`
+  - `{"call": "schedule.cancel", "args": ["tick"]}`
+- `schedule.list(prefix?: string) -> array`
+  - `{"let": {"name": "jobs", "type": "array", "value": {"expr": "schedule.list('tick')"}}}`
+
+### balance.*
+- `balance.get(user_id?: string) -> number`
+  - `{"let": {"name": "bal", "type": "number", "value": {"expr": "balance.get(user.id(ctx))"}}}`
+- `balance.add(user_id: string, amount: number, reason?: string) -> number`
+  - `{"call": "balance.add", "args": [{"expr": "user.id(ctx)"}, 10, "bonus"]}`
+- `balance.remove(user_id: string, amount: number, reason?: string) -> number`
+  - `{"call": "balance.remove", "args": [{"expr": "user.id(ctx)"}, 5, "fee"]}`
+- `balance.transfer_atomic(from_id: string, to_id: string, amount: number, reason?: string) -> bool`
+  - `{"call": "balance.transfer_atomic", "args": ["1", "2", 100]}`
+- `balance.can_remove(user_id: string, amount: number) -> bool`
+  - `{"let": {"name": "ok", "type": "bool", "value": {"expr": "balance.can_remove(user.id(ctx), 50)"}}}`
+
+### economy.*
+- `economy.lock(key?: string, ttl?: number) -> bool`
+  - `{"call": "economy.lock", "args": ["bank", 60]}`
+- `economy.unlock(key?: string) -> bool`
+  - `{"call": "economy.unlock", "args": ["bank"]}`
+
+### treasury.*
+- `treasury.get() -> number`
+  - `{"let": {"name": "treasury", "type": "number", "value": {"expr": "treasury.get()"}}}`
+- `treasury.add(amount: number, reason?: string) -> number`
+  - `{"call": "treasury.add", "args": [50, "donation"]}`
+- `treasury.remove(amount: number, reason?: string) -> number`
+  - `{"call": "treasury.remove", "args": [25, "payout"]}`
+
+### kv.*
+- `kv.incr(key: string, delta?: number, ttl?: number) -> number`
+  - `{"let": {"name": "cnt", "type": "number", "value": {"expr": "kv.incr('hits', 1, 3600)"}}}`
+- `kv.list(prefix: string, limit?: number, cursor?: string) -> object`
+  - `{"let": {"name": "list", "type": "object", "value": {"expr": "kv.list('hits')"}}}`
+- `kv.set_ttl(key: string, ttl: number) -> bool`
+  - `{"call": "kv.set_ttl", "args": ["hits", 600]}`
+- `kv.get_meta(key: string) -> object`
+  - `{"let": {"name": "meta", "type": "object", "value": {"expr": "kv.get_meta('hits')"}}}`
+
+### persist.*
+- `persist.incr(user_id: string, key: string, delta?: number) -> number`
+  - `{"let": {"name": "lvl", "type": "number", "value": {"expr": "persist.incr(user.id(ctx), 'lvl', 1)"}}}`
+- `persist.list(user_id: string, prefix: string, limit?: number, cursor?: string) -> object`
+  - `{"let": {"name": "plist", "type": "object", "value": {"expr": "persist.list(user.id(ctx), 'lvl')"}}}`
+
+### db.*
+- `db.transaction(actions: array) -> bool`
+  - `{"call": "db.transaction", "args": [[{"call": "balance.add", "args": ["1", 10]}]]}`
+
+### http.*
+- `http.get(url: string, headers?: object) -> object`
+  - `{"let": {"name": "resp", "type": "object", "value": {"expr": "http.get('https://example.com')"}}}`
+- `http.post(url: string, data?: any, headers?: object) -> object`
+  - `{"let": {"name": "resp", "type": "object", "value": {"expr": "http.post('https://example.com', {"name": "test"})"}}}`
+- `http.request(method: string, url: string, data?: any, headers?: object) -> object`
+  - `{"let": {"name": "resp", "type": "object", "value": {"expr": "http.request('PUT', 'https://example.com', {"ok": true})"}}}`
+
+### crypto.*
+- `crypto.sha256(text: string) -> string`
+  - `{"let": {"name": "hash", "type": "string", "value": {"expr": "crypto.sha256('data')"}}}`
+- `crypto.hmac_sha256(key: string, text: string) -> string`
+  - `{"let": {"name": "hmac", "type": "string", "value": {"expr": "crypto.hmac_sha256('k', 'data')"}}}`
+
+### webhook.*
+- `webhook.emit(name: string, payload?: any) -> bool`
+  - `{"call": "webhook.emit", "args": ["event", {"value": 1}]}`
+
+### config.*
+- `config.get(section: string, key: string, default?: any) -> any`
+  - `{"let": {"name": "val", "type": "any", "value": {"expr": "config.get('prefix', 'list', [])"}}}`
+- `config.set(section: string, key: string, value: any) -> bool`
+  - `{"call": "config.set", "args": ["prefix", "list", ["!!", "!"]]}`
+- `config.del(section: string, key: string) -> bool`
+  - `{"call": "config.del", "args": ["prefix", "list"]}`
+- `config.list(section: string, prefix?: string) -> array`
+  - `{"let": {"name": "keys", "type": "array", "value": {"expr": "config.list('prefix')"}}}`
+
+### alias.*
+- `alias.set(command: string, alias: string) -> bool`
+  - `{"call": "alias.set", "args": ["balance", "bal"]}`
+- `alias.get(alias: string) -> string|null`
+  - `{"let": {"name": "cmd", "type": "string", "value": {"expr": "alias.get('bal')"}}}`
+- `alias.list() -> array`
+  - `{"let": {"name": "alist", "type": "array", "value": {"expr": "alias.list()"}}}`
+
+### role.*
+- `role.set(user_id: string, role: string) -> bool`
+  - `{"call": "role.set", "args": [{"expr": "user.id(ctx)"}, "moderator"]}`
+- `role.get(user_id: string) -> string`
+  - `{"let": {"name": "role", "type": "string", "value": {"expr": "role.get(user.id(ctx))"}}}`
+- `role.list() -> array`
+  - `{"let": {"name": "roles", "type": "array", "value": {"expr": "role.list()"}}}`
+
+### locale.*
+- `locale.set(value: string) -> bool`
+  - `{"call": "locale.set", "args": ["ru"]}`
+- `locale.get(default?: string) -> string`
+  - `{"let": {"name": "loc", "type": "string", "value": {"expr": "locale.get('ru')"}}}`
+
+### currency.*
+- `currency.set(value: object) -> bool`
+  - `{"call": "currency.set", "args": [{"name": "Монеты", "icon": "🪙"}]}`
+- `currency.get() -> object`
+  - `{"let": {"name": "curr", "type": "object", "value": {"expr": "currency.get()"}}}`
+
+### income.*
+- `income.source_set(name: string, value: object) -> bool`
+  - `{"call": "income.source_set", "args": ["daily", {"amount": 10}]}`
+- `income.source_get(name: string) -> object|null`
+  - `{"let": {"name": "inc", "type": "object", "value": {"expr": "income.source_get('daily')"}}}`
+
+### reward.*
+- `reward.formula_set(name: string, formula: string) -> bool`
+  - `{"call": "reward.formula_set", "args": ["daily", "base*1.2"]}`
+- `reward.formula_get(name: string) -> string|null`
+  - `{"let": {"name": "formula", "type": "string", "value": {"expr": "reward.formula_get('daily')"}}}`
+
+### cap.*
+- `cap.set(name: string, value: number) -> bool`
+  - `{"call": "cap.set", "args": ["balance", 100000]}`
+- `cap.get(name: string, default?: number) -> number`
+  - `{"let": {"name": "cap", "type": "number", "value": {"expr": "cap.get('balance', 0)"}}}`
+
+### cooldown.*
+- `cooldown.set(key: string, seconds: number) -> bool`
+  - `{"call": "cooldown.set", "args": ["daily", 86400]}`
+- `cooldown.check(key: string) -> bool`
+  - `{"let": {"name": "ready", "type": "bool", "value": {"expr": "cooldown.check('daily')"}}}`
+- `cooldown.remaining(key: string) -> number`
+  - `{"let": {"name": "left", "type": "number", "value": {"expr": "cooldown.remaining('daily')"}}}`
+- `cooldown.clear(key: string) -> bool`
+  - `{"call": "cooldown.clear", "args": ["daily"]}`
+
+### ratelimit.*
+- `ratelimit.hit(key: string, limit: number, period: number) -> bool`
+  - `{"let": {"name": "ok", "type": "bool", "value": {"expr": "ratelimit.hit('spam', 5, 60)"}}}`
+- `ratelimit.remaining(key: string) -> number`
+  - `{"let": {"name": "rem", "type": "number", "value": {"expr": "ratelimit.remaining('spam')"}}}`
+
+### tax.*
+- `tax.set(value: number) -> bool`
+  - `{"call": "tax.set", "args": [5]}`
+- `tax.get(default?: number) -> number`
+  - `{"let": {"name": "tax", "type": "number", "value": {"expr": "tax.get(0)"}}}`
+
+### shop.*
+- `shop.item_set(code: string, value: object) -> bool`
+  - `{"call": "shop.item_set", "args": ["vip", {"price": 1000}]}`
+- `shop.item_get(code: string) -> object|null`
+  - `{"let": {"name": "item", "type": "object", "value": {"expr": "shop.item_get('vip')"}}}`
+- `shop.item_del(code: string) -> bool`
+  - `{"call": "shop.item_del", "args": ["vip"]}`
+- `shop.item_list(prefix?: string) -> array`
+  - `{"let": {"name": "items", "type": "array", "value": {"expr": "shop.item_list('v')"}}}`
+
+### lootbox.*
+- `lootbox.set(code: string, value: object) -> bool`
+  - `{"call": "lootbox.set", "args": ["box1", {"rewards": [1,2]}]}`
+- `lootbox.get(code: string) -> object|null`
+  - `{"let": {"name": "box", "type": "object", "value": {"expr": "lootbox.get('box1')"}}}`
+
+### transfer.*
+- `transfer.rules_set(value: object) -> bool`
+  - `{"call": "transfer.rules_set", "args": [{"tax": 2}]}`
+- `transfer.rules_get() -> object`
+  - `{"let": {"name": "rules", "type": "object", "value": {"expr": "transfer.rules_get()"}}}`
+
+### antifarm.*
+- `antifarm.set(value: object) -> bool`
+  - `{"call": "antifarm.set", "args": [{"min_delay": 5}]}`
+- `antifarm.get() -> object`
+  - `{"let": {"name": "anti", "type": "object", "value": {"expr": "antifarm.get()"}}}`
+
+### feature.*
+- `feature.set(name: string, value: bool) -> bool`
+  - `{"call": "feature.set", "args": ["market", true]}`
+- `feature.get(name: string, default?: bool) -> bool`
+  - `{"let": {"name": "enabled", "type": "bool", "value": {"expr": "feature.get('market', false)"}}}`
+
+### audit.*
+- `audit.log(event: string, payload?: object) -> bool`
+  - `{"call": "audit.log", "args": ["purchase", {"item": "vip"}]}`
+
+### metric.*
+- `metric.inc(name: string, value?: number) -> bool`
+  - `{"call": "metric.inc", "args": ["views", 1]}`
+
+### metrics.*
+- `metrics.incr(name: string, value?: number) -> bool`
+  - `{"call": "metrics.incr", "args": ["views", 1]}`
+
+### Глобальные функции (без префикса)
+- `active_chat_id() -> number`
+  - `{"let": {"name": "cid", "type": "number", "value": {"expr": "active_chat_id()"}}}`
+- `assert_(cond: bool, message?: string) -> bool`
+  - `{"call": "assert_", "args": [{"expr": "balance.get(user.id(ctx)) > 0"}, "Баланс пуст"]}`
+- `log(value: any) -> bool`
+  - `{"call": "log", "args": ["debug"]}`
+- `error_last() -> object`
+  - `{"let": {"name": "err", "type": "object", "value": {"expr": "error_last()"}}}`
+- `prefix_get(default?: array) -> array`
+  - `{"let": {"name": "pref", "type": "array", "value": {"expr": "prefix_get(['!!'])"}}}`
+- `prefix_set(prefixes: array) -> bool`
+  - `{"call": "prefix_set", "args": [["!!", "!"]]}`
+- `rate_limit(key: string, limit: number, period: number) -> bool`
+  - `{"let": {"name": "ok", "type": "bool", "value": {"expr": "rate_limit('msg', 3, 60)"}}}`
+- `start_balance_get(default?: number) -> number`
+  - `{"let": {"name": "start", "type": "number", "value": {"expr": "start_balance_get(0)"}}}`
+- `start_balance_set(value: number) -> bool`
+  - `{"call": "start_balance_set", "args": [100]}`
+- `timezone_get(default?: string) -> string`
+  - `{"let": {"name": "tz", "type": "string", "value": {"expr": "timezone_get('Europe/Moscow')"}}}`
+- `timezone_set(value: string) -> bool`
+  - `{"call": "timezone_set", "args": ["Europe/Moscow"]}`
+- `day_boundary_get(default?: number) -> number`
+  - `{"let": {"name": "hour", "type": "number", "value": {"expr": "day_boundary_get(0)"}}}`
+- `day_boundary_set(value: number) -> bool`
+  - `{"call": "day_boundary_set", "args": [4]}`
+- `to_bool(value: any) -> bool`
+  - `{"let": {"name": "flag", "type": "bool", "value": {"expr": "to_bool('true')"}}}`
+- `to_number(value: any) -> number`
+  - `{"let": {"name": "num", "type": "number", "value": {"expr": "to_number('12.5')"}}}`
+- `to_string(value: any) -> string`
+  - `{"let": {"name": "txt", "type": "string", "value": {"expr": "to_string(100)"}}}`
+- `type_of(value: any) -> string`
+  - `{"let": {"name": "t", "type": "string", "value": {"expr": "type_of([1,2])"}}}`
+- `var_exists(name: string) -> bool`
+  - `{"let": {"name": "ok", "type": "bool", "value": {"expr": "var_exists('x')"}}}`
+- `var_unset(name: string) -> bool`
+  - `{"call": "var_unset", "args": ["x"]}`
+- `break_loop()` / `continue_loop()` / `try_catch(...)` — служебные функции для движка.
+
+## 10. Каталог автогенерируемых функций (300+)
+Ниже — **300 имён функций**, полностью валидных и рабочих (часть из 1000 доступных):
+```
+math.add_1
+math.add_2
+math.add_3
+math.add_4
+math.add_5
+math.add_6
+math.add_7
+math.add_8
+math.add_9
+math.add_10
+math.add_11
+math.add_12
+math.add_13
+math.add_14
+math.add_15
+math.add_16
+math.add_17
+math.add_18
+math.add_19
+math.add_20
+math.add_21
+math.add_22
+math.add_23
+math.add_24
+math.add_25
+math.add_26
+math.add_27
+math.add_28
+math.add_29
+math.add_30
+math.add_31
+math.add_32
+math.add_33
+math.add_34
+math.add_35
+math.add_36
+math.add_37
+math.add_38
+math.add_39
+math.add_40
+math.add_41
+math.add_42
+math.add_43
+math.add_44
+math.add_45
+math.add_46
+math.add_47
+math.add_48
+math.add_49
+math.add_50
+math.add_51
+math.add_52
+math.add_53
+math.add_54
+math.add_55
+math.add_56
+math.add_57
+math.add_58
+math.add_59
+math.add_60
+math.add_61
+math.add_62
+math.add_63
+math.add_64
+math.add_65
+math.add_66
+math.add_67
+math.add_68
+math.add_69
+math.add_70
+math.add_71
+math.add_72
+math.add_73
+math.add_74
+math.add_75
+math.add_76
+math.add_77
+math.add_78
+math.add_79
+math.add_80
+math.add_81
+math.add_82
+math.add_83
+math.add_84
+math.add_85
+math.add_86
+math.add_87
+math.add_88
+math.add_89
+math.add_90
+math.add_91
+math.add_92
+math.add_93
+math.add_94
+math.add_95
+math.add_96
+math.add_97
+math.add_98
+math.add_99
+math.add_100
+math.sub_1
+math.sub_2
+math.sub_3
+math.sub_4
+math.sub_5
+math.sub_6
+math.sub_7
+math.sub_8
+math.sub_9
+math.sub_10
+math.sub_11
+math.sub_12
+math.sub_13
+math.sub_14
+math.sub_15
+math.sub_16
+math.sub_17
+math.sub_18
+math.sub_19
+math.sub_20
+math.sub_21
+math.sub_22
+math.sub_23
+math.sub_24
+math.sub_25
+math.sub_26
+math.sub_27
+math.sub_28
+math.sub_29
+math.sub_30
+math.sub_31
+math.sub_32
+math.sub_33
+math.sub_34
+math.sub_35
+math.sub_36
+math.sub_37
+math.sub_38
+math.sub_39
+math.sub_40
+math.sub_41
+math.sub_42
+math.sub_43
+math.sub_44
+math.sub_45
+math.sub_46
+math.sub_47
+math.sub_48
+math.sub_49
+math.sub_50
+math.sub_51
+math.sub_52
+math.sub_53
+math.sub_54
+math.sub_55
+math.sub_56
+math.sub_57
+math.sub_58
+math.sub_59
+math.sub_60
+math.sub_61
+math.sub_62
+math.sub_63
+math.sub_64
+math.sub_65
+math.sub_66
+math.sub_67
+math.sub_68
+math.sub_69
+math.sub_70
+math.sub_71
+math.sub_72
+math.sub_73
+math.sub_74
+math.sub_75
+math.sub_76
+math.sub_77
+math.sub_78
+math.sub_79
+math.sub_80
+math.sub_81
+math.sub_82
+math.sub_83
+math.sub_84
+math.sub_85
+math.sub_86
+math.sub_87
+math.sub_88
+math.sub_89
+math.sub_90
+math.sub_91
+math.sub_92
+math.sub_93
+math.sub_94
+math.sub_95
+math.sub_96
+math.sub_97
+math.sub_98
+math.sub_99
+math.sub_100
+math.mul_1
+math.mul_2
+math.mul_3
+math.mul_4
+math.mul_5
+math.mul_6
+math.mul_7
+math.mul_8
+math.mul_9
+math.mul_10
+math.mul_11
+math.mul_12
+math.mul_13
+math.mul_14
+math.mul_15
+math.mul_16
+math.mul_17
+math.mul_18
+math.mul_19
+math.mul_20
+math.mul_21
+math.mul_22
+math.mul_23
+math.mul_24
+math.mul_25
+math.mul_26
+math.mul_27
+math.mul_28
+math.mul_29
+math.mul_30
+math.mul_31
+math.mul_32
+math.mul_33
+math.mul_34
+math.mul_35
+math.mul_36
+math.mul_37
+math.mul_38
+math.mul_39
+math.mul_40
+math.mul_41
+math.mul_42
+math.mul_43
+math.mul_44
+math.mul_45
+math.mul_46
+math.mul_47
+math.mul_48
+math.mul_49
+math.mul_50
+math.mul_51
+math.mul_52
+math.mul_53
+math.mul_54
+math.mul_55
+math.mul_56
+math.mul_57
+math.mul_58
+math.mul_59
+math.mul_60
+math.mul_61
+math.mul_62
+math.mul_63
+math.mul_64
+math.mul_65
+math.mul_66
+math.mul_67
+math.mul_68
+math.mul_69
+math.mul_70
+math.mul_71
+math.mul_72
+math.mul_73
+math.mul_74
+math.mul_75
+math.mul_76
+math.mul_77
+math.mul_78
+math.mul_79
+math.mul_80
+math.mul_81
+math.mul_82
+math.mul_83
+math.mul_84
+math.mul_85
+math.mul_86
+math.mul_87
+math.mul_88
+math.mul_89
+math.mul_90
+math.mul_91
+math.mul_92
+math.mul_93
+math.mul_94
+math.mul_95
+math.mul_96
+math.mul_97
+math.mul_98
+math.mul_99
+math.mul_100
+```
+
+## 11. Объёмный пример скрипта
+```json
+{
+  "imports": ["text", "json"],
+  "consts": {"daily_bonus": 25, "tax": 5},
+  "functions": [
+    {
+      "name": "calc_bonus",
+      "params": [{"name": "base", "type": "number"}],
+      "returns": "number",
+      "actions": [
+        {"let": {"name": "bonus", "type": "number", "value": {"expr": "base + daily_bonus"}}},
+        {"return": {"expr": "bonus"}}
+      ]
+    }
+  ],
+  "commands": [
+    {
+      "name": "бонус",
+      "description": "Выдать разовый бонус",
+      "actions": [
+        {"let": {"name": "uid", "type": "string", "value": {"expr": "user.id(ctx)"}}},
+        {"let": {"name": "bonus", "type": "number", "value": {"expr": "calc_bonus(10)"}}},
+        {"call": "balance.add", "args": [{"expr": "uid"}, {"expr": "bonus"}, "bonus"]},
+        {"call": "message.send", "args": [{"expr": "chat.id(ctx)"}, {"expr": "text.format('✅ {name}, +{bonus}', {\"name\": user.name(uid), \"bonus\": bonus})"}]}
+      ]
+    },
+    {
+      "name": "баланс игрока",
+      "description": "Показать баланс",
+      "actions": [
+        {"let": {"name": "uid", "type": "string", "value": {"expr": "command.parse_user(command.arg(0, ''))"}}},
+        {"if": "uid == null", "then": [{"set": {"name": "uid", "value": {"expr": "user.id(ctx)"}}}]},
+        {"let": {"name": "bal", "type": "number", "value": {"expr": "balance.get(uid)"}}},
+        {"call": "message.send", "args": [{"expr": "chat.id(ctx)"}, {"expr": "text.format('💰 {name}: {bal}', {\"name\": user.name(uid), \"bal\": bal})"}]}
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "daily",
+      "actions": [
+        {"let": {"name": "members", "type": "array", "value": {"expr": "members.list()"}}},
+        {"for": {"var": "u", "in": "members"},
+         "body": [
+           {"call": "balance.add", "args": [{"expr": "u"}, {"expr": "daily_bonus"}, "daily"]}
+         ]
+        }
+      ]
+    }
+  ]
+}
 ```
-command "admin_10"():
-  log("info", "admin check 10")
-  message_send(chat_id(ctx), "ok 10")
-```
-
-## 31. Наблюдаемость
-- Метрика 1: metrics_incr("custom_1", 1, {{"source":"doc"}})
-- Метрика 2: metrics_incr("custom_2", 1, {{"source":"doc"}})
-- Метрика 3: metrics_incr("custom_3", 1, {{"source":"doc"}})
-- Метрика 4: metrics_incr("custom_4", 1, {{"source":"doc"}})
-- Метрика 5: metrics_incr("custom_5", 1, {{"source":"doc"}})
-
-## 32. Дополнительные замечания
-Повторяйте практику: читать лог компиляции, запускать форматтер, обновлять тесты. Чем больше примеров вы пишете, тем легче поддерживать скрипты без ошибок.
-
